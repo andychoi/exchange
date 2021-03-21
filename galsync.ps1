@@ -7,33 +7,50 @@ param(
     [ValidateSet("export", "import", "delete")]
     [string]$operation,
     [switch]$ConfirmDeletes,
-    [switch]$TestDelete
+    [switch]$ForceUpdate,
+    [string]$csvfile,
+    [String[]]$Domains
 )
-# import export delete disable
-#galsync2.ps1 delete -ConfirmDeletes 
+# import, import -ForceUpdate, export, disable, delete, delete -ConfirmDeletes 
+# .\galsync.ps1 export -Domains "abc", "xyz.com" -csvfile kma-tenant.csv
+# .\galsync.ps1 import -csvfile kor-tenant.csv
 
 ###############
 #  Variables  #
 ###############
 
 Write-Host "Enter the Exchange Online Credentials" -ForegroundColor Yellow
-$outputcsv = ".\galSyncc.csv"
-$inputcsv  = ".\galSyncc-test.csv"
-$RecipientTypes = ('UserMailbox', 'MailUser', 'MailContact', 'MailUniversalSecurityGroup', 'MailUniversalDistributionGroup', 'RemoteUserMailbox')
+
+#If no filename specified,
+if (!($csvfile)) { 
+	$csvfile  = ".\galSyncc.csv"
+}
+
+#https://docs.microsoft.com/en-us/exchange/recipients/recipients?view=exchserver-2019
+# - A mail user is similar to a mail contact, except that a mail user has Active Directory logon credentials and can access resources.
+#$RecipientTypes = ('UserMailbox', 'MailUser', 'MailContact', 'MailUniversalSecurityGroup', 'MailUniversalDistributionGroup', 'RemoteUserMailbox')
+$RecipientTypes = ('UserMailbox', 'MailUser', 'RemoteUserMailbox')
 
 #O365 domains exclude + additional domain to exclude
-$DomainsToExclude = ("AAA.COM", "domain2.com")  #hke.local
+$DomainsToExclude = ("domain1.com", "domain2.com")  #hke.local
+Foreach ($domain in $Domains) {
+    $DomainsToExclude += $domain
+}
+
 
 #$galTemp, $galTempp, $galTempfinal = [System.Collections.ArrayList]@()
 $galTemp, $galTempp, $galTempfinal = @()
 
-$unlimited = "unlimited"  #30
+$resultsize  =  "unlimited"  #30
+$resultsize2 =  30
+
 #Note: The ConnectionUri value is http, not https
-#$onpremisesConnectionUri = "http://irvhisechp10.hke.local/PowerShell"
-$onpremisesConnectionUri = "http://owa.hisna.com/PowerShell"
+$onpremisesConnectionUri = "http://owa.fdqn/PowerShell"
 $EXOConnectionUri = "https://outlook.office365.com/powerShell-liveID?serializationLevel=Fullset-ads"
+
 $SyncAttribute = "CustomAttribute10"
 $SyncAttributeValue = "Sync"
+
 $DesktopPath = [Environment]::GetFolderPath("Desktop")
 $logfi = $DesktopPath + "\GalLog_" + [DateTime]::Now.ToString("yyyyMMdd") + ".csv"
 if (!(Test-Path($logfi))) { "Date,Status,Message, PrimarySmtpAddress,DisplayName">$logfi }
@@ -66,7 +83,6 @@ Function Write-Log {
         Write-Output $Line
     }
 }
-
 
 ####################
 #  Authentication  #
@@ -118,8 +134,13 @@ Function auth_Online {
         If ($MFAExchangeModule) {
             . "$MFAExchangeModule"
         }
-       # Connect-EXOPSSession  
-        Connect-ExchangeOnline
+        # Connect-EXOPSSession  
+        # Connect-ExchangeOnline 
+        # https://techcommunity.microsoft.com/t5/exchange-team-blog/updated-running-powershell-cmdlets-for-large-numbers-of-users-in/ba-p/1000628
+        # https://techcommunity.microsoft.com/t5/exchange/60-minutes-timeout-on-mfa-session/m-p/559224
+        # Exit-PSSession
+        Connect-ExchangeOnline # -PSSessionOption IdleTimeout 7200000 
+	    # $SessionOption = New-PSSessionOption -IdleTimeout 7200000         
     }
     catch {
         Write-Host "We couldn't authenticate to Exchange Online" -ForegroundColor Red -BackgroundColor Yellow
@@ -130,20 +151,30 @@ Function auth_Online {
 ####################################
 #  Configure the excluded domains  #
 ####################################
+
 function get_Excluded_Domains() {
     Write-Host "We need to authenticate to EXO to get the accepted domains" -ForegroundColor black -BackgroundColor Yellow
     #temp for testing purpose comment out
     auth_Online
     #Get-AcceptedDomain returns accepted domains from O365 tenant
+    #if single value, it becomes System-object instead of System-Array... so reverse..copy
     if ($DomainsToExclude) {
-        $domainsexcluded = (Get-AcceptedDomain -ErrorAction Stop).DomainName | ? { $_ -notlike "*onmicrosoft.com" }
-        $domainsexcluded += $DomainsToExclude
+        $domainsexcluded = $DomainsToExclude
+        $domainsexcluded += ( (Get-AcceptedDomain -ErrorAction Stop).DomainName | ? { $_ -notlike "*onmicrosoft.com" } )
+#        $domainsexcluded += $DomainsToExclude
+
+#https://devblogs.microsoft.com/scripting/speed-up-array-comparisons-in-powershell-with-a-runtime-regex/
+# - not working... don't know why
+#        [regex] $regexdomain = '(?i)^(' + (($domainsexcluded | foreach {[regex]::escape($_)}) -join "|") + ')$'
+#MS version:
         $script:regexdomain = ($domainsexcluded | % { $_ }) -join "|"
         Write-Host "These domains going to be excluded: $regexdomain" -ForegroundColor Yellow
+#        Write-Host "Exclusion: $domainsexcluded"
         Write-Log -Message "Domains excluded: $regexdomain ,," -Level INFO -logfile $logfi
     }
     else {
         $domainsexcluded = (Get-AcceptedDomain -ErrorAction Stop).DomainName | ? { $_ -notlike "*onmicrosoft.com" }
+#        [regex] $regexdomain = '(?i)^(' + (($domainsexcluded | foreach {[regex]::escape($_)}) -join "|") + ')$'
         $script:regexdomain = ($domainsexcluded | % { $_ }) -join "|"
         Write-Host "These domains going to be excluded: $regexdomain" -ForegroundColor Yellow
         Write-Log -Message "Domains excluded: $regexdomain ,," -Level INFO -logfile $logfi
@@ -187,7 +218,7 @@ function export() {
     #  Exporting All receipients  #
     ###############################
     Write-Host "We need to authenticate to Exchange on premises to export all the recipients" -ForegroundColor black -BackgroundColor Yellow
-    if (Test-Path($outputcsv)) { Clear-Content $outputcsv }
+    if (Test-Path($csvfile)) { Clear-Content $csvfile }
     auth_OnPremises
     Set-AdServerSettings -ViewEntireForest $True
     Write-Host "Exporting all Recipients" -ForegroundColor Green
@@ -201,46 +232,68 @@ function export() {
             UserMailbox {
                 Write-Host "    Exporting Mailboxes" -ForegroundColor Yellow
                 Set-AdServerSettings -ViewEntireForest $True
-#                $galTemp = Get-mailbox -ResultSize $unlimited -WarningAction SilentlyContinue -ErrorAction SilentlyContinue | ? { ($_.Alias -notmatch "DiscoverySearchMailbox") -and ($_.PrimarySmtpAddress -notmatch $regexdomain) -and ($_.OrganizationalUnit -notmatch 'HKEnterprise.*Disabled-Accounts') } | Select Alias, DisplayName, @{n = "EmailAddresses"; e = { $_.EmailAddresses -join ";" } }, ExternalEmailAddress, FirstName, HiddenFromAddressListsEnabled, LastName, LegacyExchangeDn, Name, PrimarySmtpAddress, RecipientType, @{n = "Phone"; e = { "" } }, @{n = "MobilePhone"; e = { "" } }, @{n = "Company"; e = { "" } }, @{n = "Title"; e = { "" } }, @{n = "Department"; e = { "" } }, @{n = "Office"; e = { "" } }, guid
-                $galTemp = Get-mailbox -ResultSize $unlimited -WarningAction SilentlyContinue -ErrorAction SilentlyContinue | ? { ($_.Alias -notmatch "DiscoverySearchMailbox") -and ($_.PrimarySmtpAddress.Split("@")[1] -notmatch $regexdomain) -and ($_.OrganizationalUnit -notmatch 'HKEnterprise.*Disabled-Accounts') } | Select Alias, DisplayName, @{n = "EmailAddresses"; e = { $_.EmailAddresses -join ";" } }, ExternalEmailAddress, FirstName, HiddenFromAddressListsEnabled, LastName, LegacyExchangeDn, Name, PrimarySmtpAddress, RecipientType, @{n = "Phone"; e = { "" } }, @{n = "MobilePhone"; e = { "" } }, @{n = "Company"; e = { "" } }, @{n = "Title"; e = { "" } }, @{n = "Department"; e = { "" } }, @{n = "Office"; e = { "" } }, guid
+#                $galTemp = Get-mailbox -ResultSize $resultsize -WarningAction SilentlyContinue -ErrorAction SilentlyContinue | ? { ($_.Alias -notmatch "DiscoverySearchMailbox") -and ($_.PrimarySmtpAddress -notmatch $regexdomain) -and ($_.OrganizationalUnit -notmatch 'HKEnterprise.*Disabled-Accounts') } | Select Alias, DisplayName, @{n = "EmailAddresses"; e = { $_.EmailAddresses -join ";" } }, ExternalEmailAddress, FirstName, HiddenFromAddressListsEnabled, LastName, LegacyExchangeDn, Name, PrimarySmtpAddress, RecipientType, @{n = "Phone"; e = { "" } }, @{n = "MobilePhone"; e = { "" } }, @{n = "Company"; e = { "" } }, @{n = "Title"; e = { "" } }, @{n = "Department"; e = { "" } }, @{n = "Office"; e = { "" } }, guid
+                $galTemp = Get-mailbox -ResultSize $resultsize -WarningAction SilentlyContinue -ErrorAction SilentlyContinue | ? `
+                    { ($_.Alias -notmatch "DiscoverySearchMailbox") -and ($_.ExchangeUserAccountControl -ne 'AccountDisabled') -and ($_.PrimarySmtpAddress -ne "") -and ($_.PrimarySmtpAddress.Split("@")[1] -notmatch $regexdomain) -and ($_.OrganizationalUnit -notmatch 'HKEnterprise.*Disabled-Accounts') } `
+                    | Select Alias, DisplayName, @{n = "EmailAddresses"; e = { $_.EmailAddresses -join ";" } }, ExternalEmailAddress, FirstName, HiddenFromAddressListsEnabled, LastName, LegacyExchangeDn, Name, PrimarySmtpAddress, RecipientType, @{n = "Phone"; e = { "" } }, @{n = "MobilePhone"; e = { "" } }, @{n = "Company"; e = { "" } }, @{n = "Title"; e = { "" } }, @{n = "Department"; e = { "" } }, @{n = "Office"; e = { "" } }, guid
                 $galTempp += finaluserprop($galTemp)
                 #$_-'PrimarySmtpAddress'.Split("@")[1]
             }
             MailUser {
                 Write-Host "    Exporting MailUser" -ForegroundColor Yellow
                 Set-AdServerSettings -ViewEntireForest $True
-                $galTemp = Get-MailUser -Resultsize $unlimited -WarningAction SilentlyContinue -ErrorAction SilentlyContinue | ? { ($_.Alias -notmatch "DiscoverySearchMailbox") -and ($_.PrimarySmtpAddress -notmatch $regexdomain) } | Select Alias, DisplayName, @{n = "EmailAddresses"; e = { $_.EmailAddresses -join ";" } }, ExternalEmailAddress, FirstName, HiddenFromAddressListsEnabled, LastName, LegacyExchangeDn, Name, PrimarySmtpAddress, RecipientType, @{n = "Phone"; e = { "" } }, @{n = "MobilePhone"; e = { "" } }, @{n = "Company"; e = { "" } }, @{n = "Title"; e = { "" } }, @{n = "Department"; e = { "" } }, @{n = "Office"; e = { "" } }, guid
+                $galTemp = Get-MailUser -Resultsize $resultsize2 -WarningAction SilentlyContinue -ErrorAction SilentlyContinue | ? `
+                    { ($_.Alias -notmatch "DiscoverySearchMailbox") -and ($_.ExchangeUserAccountControl -ne 'AccountDisabled') -and ($_.PrimarySmtpAddress -ne "")  -and ($_.PrimarySmtpAddress.Split("@")[1] -notmatch $regexdomain) } `
+                    | Select Alias, DisplayName, @{n = "EmailAddresses"; e = { $_.EmailAddresses -join ";" } }, ExternalEmailAddress, FirstName, HiddenFromAddressListsEnabled, LastName, LegacyExchangeDn, Name, PrimarySmtpAddress, RecipientType, @{n = "Phone"; e = { "" } }, @{n = "MobilePhone"; e = { "" } }, @{n = "Company"; e = { "" } }, @{n = "Title"; e = { "" } }, @{n = "Department"; e = { "" } }, @{n = "Office"; e = { "" } }, guid
                 $galTempp += finaluserprop($galTemp)
             }
             MailContact {
                 Write-Host "    Exporting MailContacts" -ForegroundColor Yellow
                 Set-AdServerSettings -ViewEntireForest $True
-                $galTempp += Get-MailContact -ResultSize $unlimited -WarningAction SilentlyContinue -ErrorAction SilentlyContinue | ? { ($_.Alias -notmatch "DiscoverySearchMailbox") -and ($_.PrimarySmtpAddress -notmatch $regexdomain) } | Select Alias, DisplayName, @{n = "EmailAddresses"; e = { $_.EmailAddresses -join ";" } }, ExternalEmailAddress, FirstName, HiddenFromAddressListsEnabled, LastName, LegacyExchangeDn, Name, PrimarySmtpAddress, RecipientType, @{n = "Phone"; e = { "" } }, @{n = "MobilePhone"; e = { "" } }, @{n = "Company"; e = { "" } }, @{n = "Title"; e = { "" } }, @{n = "Department"; e = { "" } }, @{n = "Office"; e = { "" } }, guid
+                $galTempp += Get-MailContact -ResultSize $resultsize2 -WarningAction SilentlyContinue -ErrorAction SilentlyContinue | ? `
+                    { ($_.Alias -notmatch "DiscoverySearchMailbox") -and ($_.PrimarySmtpAddress -ne "") -and ($_.PrimarySmtpAddress.Split("@")[1] -notmatch $regexdomain) } `
+                    | Select Alias, DisplayName, @{n = "EmailAddresses"; e = { $_.EmailAddresses -join ";" } }, ExternalEmailAddress, FirstName, HiddenFromAddressListsEnabled, LastName, LegacyExchangeDn, Name, PrimarySmtpAddress, RecipientType, @{n = "Phone"; e = { "" } }, @{n = "MobilePhone"; e = { "" } }, @{n = "Company"; e = { "" } }, @{n = "Title"; e = { "" } }, @{n = "Department"; e = { "" } }, @{n = "Office"; e = { "" } }, guid
             }
             MailUniversalSecurityGroup {
                 Write-Host "    Exporting MailUniversalSecurityGroup" -ForegroundColor Yellow
                 Set-AdServerSettings -ViewEntireForest $True
-                $galTempp += Get-DistributionGroup -RecipientTypeDetails MailUniversalSecurityGroup -ResultSize $unlimited -WarningAction SilentlyContinue -ErrorAction SilentlyContinue | ? { ($_.Alias -notmatch "DiscoverySearchMailbox") -and ($_.PrimarySmtpAddress -notmatch $regexdomain) } | Select Alias, DisplayName, @{n = "EmailAddresses"; e = { $_.EmailAddresses -join ";" } }, ExternalEmailAddress, FirstName, HiddenFromAddressListsEnabled, LastName, LegacyExchangeDn, Name, PrimarySmtpAddress, RecipientType, @{n = "Phone"; e = { "" } }, @{n = "MobilePhone"; e = { "" } }, @{n = "Company"; e = { "" } }, @{n = "Title"; e = { "" } }, @{n = "Department"; e = { "" } }, @{n = "Office"; e = { "" } }, guid
+                $galTempp += Get-DistributionGroup -RecipientTypeDetails MailUniversalSecurityGroup -ResultSize $resultsize -WarningAction SilentlyContinue -ErrorAction SilentlyContinue | ? `
+                    { ($_.Alias -notmatch "DiscoverySearchMailbox") -and ($_.PrimarySmtpAddress -ne "") -and ($_.PrimarySmtpAddress.Split("@")[1] -notmatch $regexdomain) } `
+                    | Select Alias, DisplayName, @{n = "EmailAddresses"; e = { $_.EmailAddresses -join ";" } }, ExternalEmailAddress, FirstName, HiddenFromAddressListsEnabled, LastName, LegacyExchangeDn, Name, PrimarySmtpAddress, RecipientType, @{n = "Phone"; e = { "" } }, @{n = "MobilePhone"; e = { "" } }, @{n = "Company"; e = { "" } }, @{n = "Title"; e = { "" } }, @{n = "Department"; e = { "" } }, @{n = "Office"; e = { "" } }, guid
             }
             MailUniversalDistributionGroup {
                 Write-Host "    Exporting MailUniversalDistributionGroup" -ForegroundColor Yellow
                 Set-AdServerSettings -ViewEntireForest $True
-                $galTempp += Get-DistributionGroup -RecipientTypeDetails MailUniversalDistributionGroup -ResultSize $unlimited -WarningAction SilentlyContinue -ErrorAction SilentlyContinue | ? { ($_.Alias -notmatch "DiscoverySearchMailbox") -and ($_.PrimarySmtpAddress -notmatch $regexdomain) } | Select Alias, DisplayName, @{n = "EmailAddresses"; e = { $_.EmailAddresses -join ";" } }, ExternalEmailAddress, FirstName, HiddenFromAddressListsEnabled, LastName, LegacyExchangeDn, Name, PrimarySmtpAddress, RecipientType, @{n = "Phone"; e = { "" } }, @{n = "MobilePhone"; e = { "" } }, @{n = "Company"; e = { "" } }, @{n = "Title"; e = { "" } }, @{n = "Department"; e = { "" } }, @{n = "Office"; e = { "" } }, guid
+                $galTempp += Get-DistributionGroup -RecipientTypeDetails MailUniversalDistributionGroup -ResultSize $resultsize -WarningAction SilentlyContinue -ErrorAction SilentlyContinue | ? `
+                    { ($_.Alias -notmatch "DiscoverySearchMailbox") -and ($_.PrimarySmtpAddress -ne "") -and ($_.PrimarySmtpAddress.Split("@")[1] -notmatch $regexdomain) } `
+                    | Select Alias, DisplayName, @{n = "EmailAddresses"; e = { $_.EmailAddresses -join ";" } }, ExternalEmailAddress, FirstName, HiddenFromAddressListsEnabled, LastName, LegacyExchangeDn, Name, PrimarySmtpAddress, RecipientType, @{n = "Phone"; e = { "" } }, @{n = "MobilePhone"; e = { "" } }, @{n = "Company"; e = { "" } }, @{n = "Title"; e = { "" } }, @{n = "Department"; e = { "" } }, @{n = "Office"; e = { "" } }, guid
             }
             RemoteUserMailbox {
                 Write-Host "    Exporting RemoteMailboxes" -ForegroundColor Yellow
                 Set-AdServerSettings -ViewEntireForest $True
-                $galTemp = Get-RemoteMailbox -resultsize $unlimited -WarningAction SilentlyContinue -ErrorAction SilentlyContinue | ? { ($_.Alias -notmatch "DiscoverySearchMailbox") -and ($_.PrimarySmtpAddress -notmatch $regexdomain) } | Select Alias, DisplayName, @{name = "EmailAddresses"; e = { $_.EmailAddresses -join ";" } }, @{Name = "ExternalEmailAddress"; Expression = { $(($_.RemoteRoutingAddress).SmtpAddress) } }, FirstName, HiddenFromAddressListsEnabled, LastName, LegacyExchangeDn, Name, PrimarySmtpAddress, @{n = "RecipientType"; e = { $_.RecipientTypeDetails } }, @{n = "Phone"; e = { "" } }, @{n = "MobilePhone"; e = { "" } }, @{n = "Company"; e = { "" } }, @{n = "Title"; e = { "" } }, @{n = "Department"; e = { "" } }, @{n = "Office"; e = { "" } }, guid
+                $galTemp = Get-RemoteMailbox -resultsize $resultsize -WarningAction SilentlyContinue -ErrorAction SilentlyContinue | ? `
+                    { ($_.Alias -notmatch "DiscoverySearchMailbox") -and ($_.ExchangeUserAccountControl -ne 'AccountDisabled') -and ($_.PrimarySmtpAddress -ne "")  -and ($_.PrimarySmtpAddress.Split("@")[1] -notmatch $regexdomain) } `
+                    | Select Alias, DisplayName, @{name = "EmailAddresses"; e = { $_.EmailAddresses -join ";" } }, @{Name = "ExternalEmailAddress"; Expression = { $(($_.RemoteRoutingAddress).SmtpAddress) } }, FirstName, HiddenFromAddressListsEnabled, LastName, LegacyExchangeDn, Name, PrimarySmtpAddress, @{n = "RecipientType"; e = { $_.RecipientTypeDetails } }, @{n = "Phone"; e = { "" } }, @{n = "MobilePhone"; e = { "" } }, @{n = "Company"; e = { "" } }, @{n = "Title"; e = { "" } }, @{n = "Department"; e = { "" } }, @{n = "Office"; e = { "" } }, guid
                 $galTempp += finaluserprop($galTemp)
             }
 
         }
 
     }
-#TODO - if company is blank, fill with domain
-#         $_-'Company' = $_-'PrimarySmtpAddress'.Split("@")[1]
+#TODO - AD enabled user only
+# Get-User -RecipientTypeDetails UserMailbox -ResultSize Unlimited | where {$_.UseraccountControl -notlike "*accountdisabled*"} | Select-Object DisplayName,WindowsEmailAddress,UserAccountControl
+#   Import-Module ActiveDirectory
+#   if((Get-ADUser -Identity $galtemp.SamAccountName).Enabled -eq $False){
 
-    $galTempp | Export-Csv $outputcsv -Append -NoTypeInformation -Delimiter ","
+#    $Enabled = @()
+#    foreach($galTemp in $galTempp) {
+#        if ((Get-User -Identity $galTemp.PrimarySMTPAddress).UseraccountControl -notlike "*accountdisabled*") {
+#            $Enabled = $galTemp
+#        }
+#    }
+#    $Enabled | Export-Csv $csvfile -Append -NoTypeInformation -Delimiter ","
+
+    $galTempp | Export-Csv $csvfile -Append -NoTypeInformation -Delimiter ","
     Write-Log -Message "$($galTempp.Count) Objects were exported,," -Level INFO -logfile $logfi
 
 }
@@ -256,10 +309,10 @@ function import () {
     If ($RecipientTypes) {
         $RecipientTypeFilter = ($RecipientTypes | % { $_ }) -join "|"
         Write-Host "Applying RecipientTypes filter $($RecipientTypeFilter) to import list." -ForegroundColor Yellow
-        $SourceGAL = Import-Csv $inputcsv | ? { $_.RecipientType -match $RecipientTypeFilter }
+        $SourceGAL = Import-Csv $csvfile | ? { $_.RecipientType -match $RecipientTypeFilter }
     }
     else {
-        $SourceGAL = Import-Csv $inputcsv -Delimiter "," -Encoding UTF8
+        $SourceGAL = Import-Csv $csvfile -Delimiter "," -Encoding UTF8
     }
 
     $SourceGAL = $SourceGAL | ? { ($_.PrimarySmtpAddress -ne "") }
@@ -304,12 +357,15 @@ function import () {
         $checkrecip = (Get-Recipient -Identity $($gal.PrimarySmtpAddress) -ErrorAction SilentlyContinue).RecipientType
         if ($checkrecip -match 'MailUser|MailContact') {
             $ExternalEmailAddress = ($gal.ExternalEmailAddress).split(':')[1]
-        }
-        else {
+        } else {
             $ExternalEmailAddress = $gal.PrimarySmtpAddress
         }
 
-        
+        #https://techcommunity.microsoft.com/t5/exchange/60-minutes-timeout-on-mfa-session/m-p/559224
+        #60mins timeout - FIXME
+        #Invoke-ExoOnlineConnection -RepairPSSession
+        #nvoke-ExoOnlineConnection -Checktimer
+
         if (!$checkrecip) {
             try {
                 $CreateMailContact = {
@@ -364,8 +420,7 @@ function import () {
                 Write-Host "We coundn't create the MailContact for $($gal.PrimarySmtpAddress)" -ForegroundColor Red
                 Write-Log -Message "$ExternalEmailAddress couldn't be created, $ExternalEmailAddress,$DisplayName" -Level ERROR -logfile $logfi
             }
-        }
-        elseif ($checkrecip -eq 'MailContact') {
+        } elseif (($checkrecip -eq 'MailContact') -and ($ForceUpdate)) {
             try {
                 Set-MailContact $Alias -HiddenFromAddressListsEnabled $HiddenFromAddressListsEnabled -EmailAddresses $EmailAddresses -Name $Name -ea SilentlyContinue | Out-Null
                 Set-Contact $Alias -Phone $Phone -MobilePhone $MobilePhone -Title $Title -Department $Department -Office $Office -Company $Company -ea SilentlyContinue | Out-Null
@@ -380,9 +435,8 @@ function import () {
                 Write-Host "We tried to update the MailContact $ExternalEmailAddress unsuccessfuly :-( " -ForegroundColor Red
                 Write-Log -Message "We tried to update the MailContact $ExternalEmailAddress unsuccessfuly :-(, $ExternalEmailAddress,$DisplayName" -Level ERROR -logfile $logfi
             }
-        }
-        else {
-            Write-Host "The address $($gal.PrimarySmtpAddress) already exist as $checkrecip and cannot be updated" -ForegroundColor Red
+        } else {
+            Write-Host "The address $($gal.PrimarySmtpAddress) already exist as $checkrecip and cannot be updated" -ForegroundColor Magenta 
             Write-Log -Message "$ExternalEmailAddress UserMaibox already exist as $checkrecip, $ExternalEmailAddress,$DisplayName" -Level INFO -logfile $logfi
         }
     }
@@ -403,12 +457,12 @@ function deleteMailContacts () {
             $d++
             Write-Progress -Activity "$d out of $($recipwithAtt.count)" -Status $d -PercentComplete (($d / $recipwithAtt.count) * 100)
             try {
-                Write-Host "Deleting the Mailcontact $($rec.PrimarySmtpAddress)" -ForegroundColor Yellow
-                if ($TestDelete) {
-                    Write-Log -Message "Delete testing ... $($rec.PrimarySmtpAddress), $($rec.PrimarySmtpAddress),$($rec.DisplayName)" -Level INFO -logfile $logfi
-                } else {
+                if ($ConfirmDeletes) {
+                    Write-Host "Deleting the Mailcontact $($rec.PrimarySmtpAddress)" -ForegroundColor Yellow
                     Remove-MailContact -Identity $rec.identity -Confirm:$false
-                    Write-Log -Message "Deleting the Mailcontact $($rec.PrimarySmtpAddress), $($rec.PrimarySmtpAddress),$($rec.DisplayName)" -Level INFO -logfile $logfi
+                    Write-Log -Message "Deleted the Mailcontact $($rec.PrimarySmtpAddress), $($rec.PrimarySmtpAddress),$($rec.DisplayName)" -Level INFO -logfile $logfi
+                } else {
+                    Write-Host -Message "To delete:  $($rec.PrimarySmtpAddress), $($rec.PrimarySmtpAddress), $($rec.DisplayName)" 
                 }
             }
             catch {
@@ -433,7 +487,7 @@ function disables() {
     Write-Host "   Authenticating to On premises to get the disable accounts`n" -ForegroundColor Yellow
     auth_OnPremises
     $dis_Accounts = @()
-    $dis_Accounts = Get-Mailbox -ResultSize Unlimited | ? { ($_.OrganizationalUnit -match 'HKEnterprise.*Disabled-Accounts') } | select DisplayName, PrimarySmtpAddress
+    $dis_Accounts = Get-Mailbox -ResultSize Unlimited | ? { ($_.OrganizationalUnit -match 'HKEnterprise.*Disabled-Accounts') -or ($_.ExchangeUserAccountControl -ne 'AccountDisabled') } | select DisplayName, PrimarySmtpAddress
     Write-Host "   Authenticating to Exchange Online to delete the MailContacts with disabled accounts`n" -ForegroundColor Yellow
     auth_Online
     if ($dis_Accounts) {
@@ -475,13 +529,15 @@ switch ($operation) {
         }
         else {
             Write-Host "If you want to delete the MailContacts then select the parameter ConfirmDeletes" -ForegroundColor Red
+            deleteMailContacts  #test deleting
         }
             
     }
     "disable" {
         disables
+    }
+    default {
+        Write-Host "Allowed parameter: import export disable delete -ConfirmDeletes"
     }    
 
 }
-
-
