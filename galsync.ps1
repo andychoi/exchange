@@ -18,18 +18,16 @@ param(
 Write-Host "Enter the Exchange Online Credentials" -ForegroundColor Yellow
 $outputcsv = ".\galSyncc.csv"
 $inputcsv = ".\galSyncc-test.csv"
-#$RecipientTypes = ('UserMailbox', 'MailUser', 'MailContact', 'MailUniversalSecurityGroup', 'MailUniversalDistributionGroup', 'RemoteUserMailbox')
-$RecipientTypes = ('UserMailbox')
+$RecipientTypes = ('UserMailbox', 'MailUser', 'MailContact', 'MailUniversalSecurityGroup', 'MailUniversalDistributionGroup', 'RemoteUserMailbox')
 
-$DomainsToExclude = ("domain1.com", "domain2.com")  #hke.local
+$DomainsToExclude = ("domain1.com", "domain2.com")  
 
-#$galTemp, $galTempp, $galTempfinal = [System.Collections.ArrayList]@()
-$galTemp, $galTempp, $galTempfinal = @()
+$galTemp, $galTempp, $galTempfinal = [System.Collections.ArrayList]@()
 
 $unlimited = "unlimited"  #30
 #Note: The ConnectionUri value is http, not https
-#$onpremisesConnectionUri = "http://irvhisechp10.hke.local/PowerShell"
-$onpremisesConnectionUri = "http://owa.hisna.com/PowerShell"
+#$onpremisesConnectionUri = "http://fdqn/PowerShell"
+$onpremisesConnectionUri = "http://fdqn/PowerShell"
 $EXOConnectionUri = "https://outlook.office365.com/powerShell-liveID?serializationLevel=Fullset-ads"
 $SyncAttribute = "CustomAttribute10"
 $SyncAttributeValue = "Sync"
@@ -132,7 +130,7 @@ Function auth_Online {
 function get_Excluded_Domains() {
     Write-Host "We need to authenticate to EXO to get the accepted domains" -ForegroundColor black -BackgroundColor Yellow
     #temp for testing purpose comment out
-    #auth_Online
+    auth_Online
     if ($DomainsToExclude) {
         $domainsexcluded = (Get-AcceptedDomain -ErrorAction Stop).DomainName | ? { $_ -notlike "*onmicrosoft.com" }
         $domainsexcluded += $DomainsToExclude
