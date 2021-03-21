@@ -6,10 +6,11 @@
 param(
     [ValidateSet("export", "import", "delete")]
     [string]$operation,
-    [switch]$ConfirmDeletes
+    [switch]$ConfirmDeletes,
+    [switch]$TestDelete
 )
-
-
+# import export delete disable
+#galsync2.ps1 delete -ConfirmDeletes 
 
 ###############
 #  Variables  #
@@ -17,17 +18,19 @@ param(
 
 Write-Host "Enter the Exchange Online Credentials" -ForegroundColor Yellow
 $outputcsv = ".\galSyncc.csv"
-$inputcsv = ".\galSyncc-test.csv"
+$inputcsv  = ".\galSyncc-test.csv"
 $RecipientTypes = ('UserMailbox', 'MailUser', 'MailContact', 'MailUniversalSecurityGroup', 'MailUniversalDistributionGroup', 'RemoteUserMailbox')
 
-$DomainsToExclude = ("domain1.com", "domain2.com")  
+#O365 domains exclude + additional domain to exclude
+$DomainsToExclude = ("AAA.COM", "domain2.com")  #hke.local
 
-$galTemp, $galTempp, $galTempfinal = [System.Collections.ArrayList]@()
+#$galTemp, $galTempp, $galTempfinal = [System.Collections.ArrayList]@()
+$galTemp, $galTempp, $galTempfinal = @()
 
 $unlimited = "unlimited"  #30
 #Note: The ConnectionUri value is http, not https
-#$onpremisesConnectionUri = "http://fdqn/PowerShell"
-$onpremisesConnectionUri = "http://fdqn/PowerShell"
+#$onpremisesConnectionUri = "http://irvhisechp10.hke.local/PowerShell"
+$onpremisesConnectionUri = "http://owa.hisna.com/PowerShell"
 $EXOConnectionUri = "https://outlook.office365.com/powerShell-liveID?serializationLevel=Fullset-ads"
 $SyncAttribute = "CustomAttribute10"
 $SyncAttributeValue = "Sync"
@@ -97,7 +100,7 @@ Function auth_OnPremises {
     
     Import-PSSession $Session -ErrorAction Stop -WarningAction SilentlyContinue -DisableNameChecking -AllowClobber | Out-Null
     Write-Log -Message "Connected to on premises Exchange,," -Level INFO -logfile $logfi
-    $Input = Read-Host -Prompt "Connected to on premises Exchange. Press any key to continue"
+    #$Input = Read-Host -Prompt "Connected to on premises Exchange. Press any key to continue"
 }
 
 Function auth_Online {
@@ -122,7 +125,7 @@ Function auth_Online {
         Write-Host "We couldn't authenticate to Exchange Online" -ForegroundColor Red -BackgroundColor Yellow
         exit
     }
-    $Input = Read-Host -Prompt "Connected to on Exchange Online. Press any key to continue"
+    #$Input = Read-Host -Prompt "Connected to on Exchange Online. Press any key to continue"
 }
 ####################################
 #  Configure the excluded domains  #
@@ -131,6 +134,7 @@ function get_Excluded_Domains() {
     Write-Host "We need to authenticate to EXO to get the accepted domains" -ForegroundColor black -BackgroundColor Yellow
     #temp for testing purpose comment out
     auth_Online
+    #Get-AcceptedDomain returns accepted domains from O365 tenant
     if ($DomainsToExclude) {
         $domainsexcluded = (Get-AcceptedDomain -ErrorAction Stop).DomainName | ? { $_ -notlike "*onmicrosoft.com" }
         $domainsexcluded += $DomainsToExclude
@@ -197,8 +201,10 @@ function export() {
             UserMailbox {
                 Write-Host "    Exporting Mailboxes" -ForegroundColor Yellow
                 Set-AdServerSettings -ViewEntireForest $True
-                $galTemp = Get-mailbox -ResultSize $unlimited -WarningAction SilentlyContinue -ErrorAction SilentlyContinue | ? { ($_.Alias -notmatch "DiscoverySearchMailbox") -and ($_.PrimarySmtpAddress -notmatch $regexdomain) -and ($_.OrganizationalUnit -notmatch 'HKEnterprise.*Disabled-Accounts') } | Select Alias, DisplayName, @{n = "EmailAddresses"; e = { $_.EmailAddresses -join ";" } }, ExternalEmailAddress, FirstName, HiddenFromAddressListsEnabled, LastName, LegacyExchangeDn, Name, PrimarySmtpAddress, RecipientType, @{n = "Phone"; e = { "" } }, @{n = "MobilePhone"; e = { "" } }, @{n = "Company"; e = { "" } }, @{n = "Title"; e = { "" } }, @{n = "Department"; e = { "" } }, @{n = "Office"; e = { "" } }, guid
+#                $galTemp = Get-mailbox -ResultSize $unlimited -WarningAction SilentlyContinue -ErrorAction SilentlyContinue | ? { ($_.Alias -notmatch "DiscoverySearchMailbox") -and ($_.PrimarySmtpAddress -notmatch $regexdomain) -and ($_.OrganizationalUnit -notmatch 'HKEnterprise.*Disabled-Accounts') } | Select Alias, DisplayName, @{n = "EmailAddresses"; e = { $_.EmailAddresses -join ";" } }, ExternalEmailAddress, FirstName, HiddenFromAddressListsEnabled, LastName, LegacyExchangeDn, Name, PrimarySmtpAddress, RecipientType, @{n = "Phone"; e = { "" } }, @{n = "MobilePhone"; e = { "" } }, @{n = "Company"; e = { "" } }, @{n = "Title"; e = { "" } }, @{n = "Department"; e = { "" } }, @{n = "Office"; e = { "" } }, guid
+                $galTemp = Get-mailbox -ResultSize $unlimited -WarningAction SilentlyContinue -ErrorAction SilentlyContinue | ? { ($_.Alias -notmatch "DiscoverySearchMailbox") -and ($_.PrimarySmtpAddress.Split("@")[1] -notmatch $regexdomain) -and ($_.OrganizationalUnit -notmatch 'HKEnterprise.*Disabled-Accounts') } | Select Alias, DisplayName, @{n = "EmailAddresses"; e = { $_.EmailAddresses -join ";" } }, ExternalEmailAddress, FirstName, HiddenFromAddressListsEnabled, LastName, LegacyExchangeDn, Name, PrimarySmtpAddress, RecipientType, @{n = "Phone"; e = { "" } }, @{n = "MobilePhone"; e = { "" } }, @{n = "Company"; e = { "" } }, @{n = "Title"; e = { "" } }, @{n = "Department"; e = { "" } }, @{n = "Office"; e = { "" } }, guid
                 $galTempp += finaluserprop($galTemp)
+                #$_-'PrimarySmtpAddress'.Split("@")[1]
             }
             MailUser {
                 Write-Host "    Exporting MailUser" -ForegroundColor Yellow
@@ -231,14 +237,8 @@ function export() {
         }
 
     }
-
-#empty company - fill with domain : FIXME
-#    $galTempp | ForEach-Object {
-#        if ($_.'Company' -eq "") {
-#            $_-'PrimarySmtpAddress'.Split("@")[1] 
-#            $_-'Company' = $_-'PrimarySmtpAddress'.Split("@")[1]
-#        }
-#    }    
+#TODO - if company is blank, fill with domain
+#         $_-'Company' = $_-'PrimarySmtpAddress'.Split("@")[1]
 
     $galTempp | Export-Csv $outputcsv -Append -NoTypeInformation -Delimiter ","
     Write-Log -Message "$($galTempp.Count) Objects were exported,," -Level INFO -logfile $logfi
@@ -264,7 +264,7 @@ function import () {
 
     $SourceGAL = $SourceGAL | ? { ($_.PrimarySmtpAddress -ne "") }
 
-    $objCount = $SourceGAL.Count
+    $objCount = @($SourceGAL).Count
     $c = 0
     foreach ($gal in $SourceGAL) {
         $c++
@@ -280,6 +280,7 @@ function import () {
             $LegDN = "x500:" + $gal.LegacyExchangeDN
         }
 
+        #FIXMD
         [array]$EmailAddresses = $gal.EmailAddresses.Split(";")
         [array]$EmailAddresses = $EmailAddresses -match '@'
         [array]$EmailAddresses = $EmailAddresses -notmatch 'SIP'
@@ -288,6 +289,7 @@ function import () {
         }
         [array]$EmailAddresses = $EmailAddresses | Sort -Unique    
         $EmailAddressesCount = $EmailAddresses.Count
+        
         $FirstName = $gal.FirstName
         $LastName = $gal.LastName
         $Name = $gal.Name
@@ -350,6 +352,7 @@ function import () {
                 Invoke-Command -Session (Get-PSSession) -ScriptBlock $SetMailContact -ArgumentList $Alias, $Name, $HiddenFromAddressListsEnabled, $EmailAddresses | Out-Null
                 Start-Sleep -Milliseconds 300
                 Set-Contact $Alias -Phone $Phone -MobilePhone $MobilePhone -Title $Title -Department $Department -Office $Office -Company $Company -ea SilentlyContinue | Out-Null
+                #Alias=DisplayName
                 If ($SyncAttribute) {
                     $cmd = "Set-MailContact $Alias -$SyncAttribute $SyncAttributeValue"
                     Invoke-Expression $cmd
@@ -389,11 +392,11 @@ function import () {
 ############################################################
 #  Removing the MailContacts based on the Attribute value  #
 ############################################################
-
+# get-mailcontact | Where-Object {$_.CustomAttribute10 -eq "Sync"} | Select DisplayName, PrimarySMTPAddress, CustomAttribute10
 function deleteMailContacts () {
     Write-Host "We need to authenticate to EXO to delete the MailContacs with the value $SyncAttributeValue in $SyncAttribute " -ForegroundColor black -BackgroundColor Yellow
     auth_Online
-    $recipwithAtt = Get-MailContact | ? { $_.CustomAttribute10 -eq "Sync" }
+    $recipwithAtt = Get-MailContact | ? { $_.$SyncAttribute -eq $SyncAttributeValue }
     $d = 0
     if ($recipwithAtt) {
         foreach ($rec in $recipwithAtt) {
@@ -401,8 +404,12 @@ function deleteMailContacts () {
             Write-Progress -Activity "$d out of $($recipwithAtt.count)" -Status $d -PercentComplete (($d / $recipwithAtt.count) * 100)
             try {
                 Write-Host "Deleting the Mailcontact $($rec.PrimarySmtpAddress)" -ForegroundColor Yellow
-                Remove-MailContact -Identity $rec.identity -Confirm:$false
-                Write-Log -Message "Deleting the Mailcontact $($rec.PrimarySmtpAddress), $($rec.PrimarySmtpAddress),$($rec.DisplayName)" -Level INFO -logfile $logfi
+                if ($TestDelete) {
+                    Write-Log -Message "Delete testing ... $($rec.PrimarySmtpAddress), $($rec.PrimarySmtpAddress),$($rec.DisplayName)" -Level INFO -logfile $logfi
+                } else {
+                    Remove-MailContact -Identity $rec.identity -Confirm:$false
+                    Write-Log -Message "Deleting the Mailcontact $($rec.PrimarySmtpAddress), $($rec.PrimarySmtpAddress),$($rec.DisplayName)" -Level INFO -logfile $logfi
+                }
             }
             catch {
                 Write-Host "We couldn't delete the Mailcontact $($rec.PrimarySmtpAddress)" -ForegroundColor Red
@@ -467,10 +474,13 @@ switch ($operation) {
             #disables
         }
         else {
-            Write-Host "If you want to delete the MailContacts then select the parameter ConfirmDeteles" -ForegroundColor Red
+            Write-Host "If you want to delete the MailContacts then select the parameter ConfirmDeletes" -ForegroundColor Red
         }
             
     }
+    "disable" {
+        disables
+    }    
 
 }
 
