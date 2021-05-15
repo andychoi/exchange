@@ -4,16 +4,18 @@
 #  Parameters  #
 ################
 param(
-    [ValidateSet("export", "import", "delete")]
+    [ValidateSet("export", "import", "delete", "disable")]
     [string]$operation,
     [switch]$ConfirmDeletes,
     [switch]$ForceUpdate,
     [string]$csvfile,
-    [String[]]$Domains
-)
+    [String[]]$Domains,
+    [String]$username,
+    [String]$password)
+
 # import, import -ForceUpdate, export, disable, delete, delete -ConfirmDeletes 
-# .\galsync.ps1 export -Domains "abc", "xyz.com" -csvfile kma-tenant.csv
-# .\galsync.ps1 import -csvfile kor-tenant.csv
+# .\galsync.ps1 export -Domains "hma", "gma" -csvfile kma-tenant.csv
+# .\galsync.ps1 import -csvfile kma-tenant.csv
 
 ###############
 #  Variables  #
@@ -32,7 +34,7 @@ if (!($csvfile)) {
 $RecipientTypes = ('UserMailbox', 'MailUser', 'RemoteUserMailbox')
 
 #O365 domains exclude + additional domain to exclude
-$DomainsToExclude = ("domain1.com", "domain2.com")  #hke.local
+$DomainsToExclude = ("hke.local", "irvhisssap02v.com", "journal.autoeveramerica.com")  #hke.local
 Foreach ($domain in $Domains) {
     $DomainsToExclude += $domain
 }
@@ -45,11 +47,26 @@ $resultsize  =  "unlimited"  #30
 $resultsize2 =  30
 
 #Note: The ConnectionUri value is http, not https
-$onpremisesConnectionUri = "http://owa.fdqn/PowerShell"
+#$onpremisesConnectionUri = "http://irvhisechp10.hke.local/PowerShell"
+$onpremisesConnectionUri = "http://owa.hisna.com/PowerShell"
 $EXOConnectionUri = "https://outlook.office365.com/powerShell-liveID?serializationLevel=Fullset-ads"
 
 $SyncAttribute = "CustomAttribute10"
 $SyncAttributeValue = "Sync"
+
+#SAP Field	AD Information 
+#LASTNAME	sn
+#FIRSTNAME	givenName
+#SAMACCOUNTNAME	sAMAccountName
+#TITLE	title
+#OFFICE	physicalDeliveryOfficeName
+#DEPARTMENT	department
+#WORKPHONE	telephoneNumber
+#MOBILE	mobile
+#MANAGER	manager
+#GRADE	extensionAttribute10
+#COMPANY	company
+
 
 $DesktopPath = [Environment]::GetFolderPath("Desktop")
 $logfi = $DesktopPath + "\GalLog_" + [DateTime]::Now.ToString("yyyyMMdd") + ".csv"
@@ -108,7 +125,14 @@ Function auth_OnPremises {
 #   }
     $OnPremisesCredential = Get-Credential -Message "Exchange on-premises Credential"
     #   $Session = New-PSSession -ConfigurationName Microsoft.Exchange -ConnectionUri $onpremisesConnectionUri -Credential $OnPremisesCredential -Authentication Basic -AllowRedirection -ErrorAction Stop -WarningAction SilentlyContinue
-    $Session = New-PSSession -ConfigurationName Microsoft.Exchange -ConnectionUri $onpremisesConnectionUri -Authentication Kerberos -AllowRedirection 
+
+    if($password -and $username) {
+        $secure_password = ConvertTo-SecureString -String $password -AsPlainText -Force
+        $UserCredential = New-Object System.Management.Automation.PSCredential -ArgumentList $username,$secure_password
+        $Session = New-PSSession -ConfigurationName Microsoft.Exchange -ConnectionUri $onpremisesConnectionUri -Authentication Kerberos -AllowRedirection -Credential $UserCredential
+    } else {
+        $Session = New-PSSession -ConfigurationName Microsoft.Exchange -ConnectionUri $onpremisesConnectionUri -Authentication Kerberos -AllowRedirection 
+    }
     if(-not($Session)) {
         Write-Warning "Exchange Server login error"
         EXIT
@@ -119,6 +143,7 @@ Function auth_OnPremises {
     #$Input = Read-Host -Prompt "Connected to on premises Exchange. Press any key to continue"
 }
 
+#---------------------------------------------------------------------------------
 Function auth_Online {
     $ses = ""
     $ses = (Get-PSSession).Name
@@ -139,6 +164,10 @@ Function auth_Online {
         # https://techcommunity.microsoft.com/t5/exchange-team-blog/updated-running-powershell-cmdlets-for-large-numbers-of-users-in/ba-p/1000628
         # https://techcommunity.microsoft.com/t5/exchange/60-minutes-timeout-on-mfa-session/m-p/559224
         # Exit-PSSession
+
+        #Credential only works if you don't have MFA enabled. 
+        #https://techcommunity.microsoft.com/t5/windows-powershell/task-scheduler-to-connect-to-exchange-online-powershell-using/m-p/172469
+
         Connect-ExchangeOnline # -PSSessionOption IdleTimeout 7200000 
 	    # $SessionOption = New-PSSessionOption -IdleTimeout 7200000         
     }
@@ -242,7 +271,7 @@ function export() {
             MailUser {
                 Write-Host "    Exporting MailUser" -ForegroundColor Yellow
                 Set-AdServerSettings -ViewEntireForest $True
-                $galTemp = Get-MailUser -Resultsize $resultsize2 -WarningAction SilentlyContinue -ErrorAction SilentlyContinue | ? `
+                $galTemp = Get-MailUser -Resultsize $resultsize -WarningAction SilentlyContinue -ErrorAction SilentlyContinue | ? `
                     { ($_.Alias -notmatch "DiscoverySearchMailbox") -and ($_.ExchangeUserAccountControl -ne 'AccountDisabled') -and ($_.PrimarySmtpAddress -ne "")  -and ($_.PrimarySmtpAddress.Split("@")[1] -notmatch $regexdomain) } `
                     | Select Alias, DisplayName, @{n = "EmailAddresses"; e = { $_.EmailAddresses -join ";" } }, ExternalEmailAddress, FirstName, HiddenFromAddressListsEnabled, LastName, LegacyExchangeDn, Name, PrimarySmtpAddress, RecipientType, @{n = "Phone"; e = { "" } }, @{n = "MobilePhone"; e = { "" } }, @{n = "Company"; e = { "" } }, @{n = "Title"; e = { "" } }, @{n = "Department"; e = { "" } }, @{n = "Office"; e = { "" } }, guid
                 $galTempp += finaluserprop($galTemp)
@@ -250,7 +279,7 @@ function export() {
             MailContact {
                 Write-Host "    Exporting MailContacts" -ForegroundColor Yellow
                 Set-AdServerSettings -ViewEntireForest $True
-                $galTempp += Get-MailContact -ResultSize $resultsize2 -WarningAction SilentlyContinue -ErrorAction SilentlyContinue | ? `
+                $galTempp += Get-MailContact -ResultSize $resultsize -WarningAction SilentlyContinue -ErrorAction SilentlyContinue | ? `
                     { ($_.Alias -notmatch "DiscoverySearchMailbox") -and ($_.PrimarySmtpAddress -ne "") -and ($_.PrimarySmtpAddress.Split("@")[1] -notmatch $regexdomain) } `
                     | Select Alias, DisplayName, @{n = "EmailAddresses"; e = { $_.EmailAddresses -join ";" } }, ExternalEmailAddress, FirstName, HiddenFromAddressListsEnabled, LastName, LegacyExchangeDn, Name, PrimarySmtpAddress, RecipientType, @{n = "Phone"; e = { "" } }, @{n = "MobilePhone"; e = { "" } }, @{n = "Company"; e = { "" } }, @{n = "Title"; e = { "" } }, @{n = "Department"; e = { "" } }, @{n = "Office"; e = { "" } }, guid
             }
@@ -329,11 +358,13 @@ function import () {
         Write-Progress -Activity "$c out of $objCount" -Status $gal.PrimarySmtpAddress -PercentComplete (($c / $objCount) * 100)
         $Alias = $gal.Alias
         $DisplayName = $gal.DisplayName
+
+
+        #FIXME - don't update local  email addresses
         if ($gal.LegacyExchangeDN) {
             $LegDN = "x500:" + $gal.LegacyExchangeDN
         }
 
-        #FIXMD
         [array]$EmailAddresses = $gal.EmailAddresses.Split(";")
         [array]$EmailAddresses = $EmailAddresses -match '@'
         [array]$EmailAddresses = $EmailAddresses -notmatch 'SIP'
@@ -435,7 +466,22 @@ function import () {
                 Write-Host "We tried to update the MailContact $ExternalEmailAddress unsuccessfuly :-( " -ForegroundColor Red
                 Write-Log -Message "We tried to update the MailContact $ExternalEmailAddress unsuccessfuly :-(, $ExternalEmailAddress,$DisplayName" -Level ERROR -logfile $logfi
             }
-        } else {
+        } elseif (($checkrecip -eq 'MailUser') -and ($ForceUpdate)) {
+	        #guest mail user -> show in address list
+	        try {
+                Set-AzureADUser -ObjectId $PrimarySMTPAddres -ShowInAddressList $true
+                If ($SyncAttribute) {
+                    $cmd = "Set-MailContact $Alias -$SyncAttribute $SyncAttributeValue"
+                    Invoke-Expression $cmd
+                    Write-Host "The Guest mail user $ExternalEmailAddress is updated to show in address list" -ForegroundColor Green
+                    Write-Log -Message "$ExternalEmailAddress UserMaibox was updated to show in addres list, $ExternalEmailAddress,$DisplayName" -Level INFO -logfile $logfi
+                }
+            }
+            catch {
+                Write-Host "We tried to update the Guest mail user $ExternalEmailAddress unsuccessfuly :-( " -ForegroundColor Red
+                Write-Log -Message "We tried to update the Guest mail user $ExternalEmailAddress unsuccessfuly :-(, $ExternalEmailAddress,$DisplayName" -Level ERROR -logfile $logfi
+            }		
+	} else {
             Write-Host "The address $($gal.PrimarySmtpAddress) already exist as $checkrecip and cannot be updated" -ForegroundColor Magenta 
             Write-Log -Message "$ExternalEmailAddress UserMaibox already exist as $checkrecip, $ExternalEmailAddress,$DisplayName" -Level INFO -logfile $logfi
         }
@@ -450,7 +496,7 @@ function import () {
 function deleteMailContacts () {
     Write-Host "We need to authenticate to EXO to delete the MailContacs with the value $SyncAttributeValue in $SyncAttribute " -ForegroundColor black -BackgroundColor Yellow
     auth_Online
-    $recipwithAtt = Get-MailContact | ? { $_.$SyncAttribute -eq $SyncAttributeValue }
+    $recipwithAtt = Get-MailContact -ResultSize Unlimited | ? { $_.$SyncAttribute -eq $SyncAttributeValue }
     $d = 0
     if ($recipwithAtt) {
         foreach ($rec in $recipwithAtt) {
@@ -458,7 +504,7 @@ function deleteMailContacts () {
             Write-Progress -Activity "$d out of $($recipwithAtt.count)" -Status $d -PercentComplete (($d / $recipwithAtt.count) * 100)
             try {
                 if ($ConfirmDeletes) {
-                    Write-Host "Deleting the Mailcontact $($rec.PrimarySmtpAddress)" -ForegroundColor Yellow
+                    Write-Host "Deleting the Mailcontact $($rec.identity) - $($rec.PrimarySmtpAddress)" -ForegroundColor Yellow
                     Remove-MailContact -Identity $rec.identity -Confirm:$false
                     Write-Log -Message "Deleted the Mailcontact $($rec.PrimarySmtpAddress), $($rec.PrimarySmtpAddress),$($rec.DisplayName)" -Level INFO -logfile $logfi
                 } else {
